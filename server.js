@@ -1,61 +1,15 @@
-// Lunch Order app — zero dependencies (Node 22.5+ for built-in node:sqlite).
-// Run: node server.js   then open http://localhost:3000
+// Lunch Order app. Run: npm start   then open http://localhost:3000
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { DatabaseSync } = require('node:sqlite');
+const db = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const MAX_USERS = Number(process.env.MAX_USERS || 10);
+const TIMEZONE = process.env.TIMEZONE || undefined; // e.g. Asia/Singapore; defaults to the server's zone
 const SESSION_DAYS = 7;
-
-// ---------- Database ----------
-const db = new DatabaseSync(path.join(__dirname, 'lunch.db'));
-db.exec(`
-  PRAGMA foreign_keys = ON;
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    password_hash TEXT NOT NULL,
-    is_admin INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS menu_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    price REAL NOT NULL DEFAULT 0,
-    active INTEGER NOT NULL DEFAULT 1
-  );
-  CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    order_date TEXT NOT NULL,
-    menu_item_id INTEGER NOT NULL REFERENCES menu_items(id),
-    quantity INTEGER NOT NULL DEFAULT 1,
-    notes TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (user_id, order_date)
-  );
-`);
-
-if (db.prepare('SELECT COUNT(*) AS n FROM menu_items').get().n === 0) {
-  const ins = db.prepare('INSERT INTO menu_items (name, price) VALUES (?, ?)');
-  [
-    ['Turkey Club Sandwich', 9.5],
-    ['Veggie Wrap', 8.75],
-    ['Chicken Caesar Salad', 10.25],
-    ['Margherita Pizza Slice', 6.5],
-    ['Beef Burrito Bowl', 11.0],
-    ['Tomato Soup & Bread', 7.25],
-  ].forEach(([n, p]) => ins.run(n, p));
-}
 
 // ---------- Helpers ----------
 function hashPassword(password) {
@@ -70,9 +24,9 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(test, Buffer.from(hash, 'hex'));
 }
 
+// Today's date as YYYY-MM-DD in the team's time zone.
 function today() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: TIMEZONE }).format(new Date());
 }
 
 function parseCookies(req) {
@@ -84,20 +38,29 @@ function parseCookies(req) {
   return out;
 }
 
-function currentUser(req) {
-  const token = parseCookies(req).sid;
-  if (!token) return null;
-  return db.prepare(`
-    SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
-    WHERE s.token = ? AND s.expires_at > ?`).get(token, Date.now()) || null;
+function cookie(req, value, maxAge) {
+  const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+  return `sid=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
 }
 
-function createSession(res, userId) {
+async function currentUser(req) {
+  const token = parseCookies(req).sid;
+  if (!token) return null;
+  return db.get(`
+    SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE s.token = $1 AND s.expires_at > now()`, [token]);
+}
+
+async function createSession(req, res, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const maxAge = SESSION_DAYS * 24 * 3600;
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)')
-    .run(token, userId, Date.now() + maxAge * 1000);
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
+  await db.run(`INSERT INTO sessions (token, user_id, expires_at)
+    VALUES ($1, $2, now() + make_interval(secs => $3))`, [token, userId, maxAge]);
+  res.setHeader('Set-Cookie', cookie(req, token, maxAge));
+}
+
+async function userCount() {
+  return (await db.get('SELECT COUNT(*)::int AS n FROM users')).n;
 }
 
 function send(res, status, data) {
@@ -127,86 +90,85 @@ const routes = {
       return send(res, 400, { error: 'Username must be 3-30 letters, numbers, . _ or -' });
     if (String(password).length < 6)
       return send(res, 400, { error: 'Password must be at least 6 characters' });
-    const count = db.prepare('SELECT COUNT(*) AS n FROM users').get().n;
+    const count = await userCount();
     if (count >= MAX_USERS)
       return send(res, 403, { error: `This team is full (${MAX_USERS} people max)` });
-    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(name))
+    if (await db.get('SELECT 1 FROM users WHERE lower(username) = lower($1)', [name]))
       return send(res, 409, { error: 'That username is taken' });
     // First person to sign up becomes the admin (can edit the menu).
-    const r = db.prepare('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)')
-      .run(name, hashPassword(String(password)), count === 0 ? 1 : 0);
-    createSession(res, r.lastInsertRowid);
+    const user = await db.get(
+      'INSERT INTO users (username, password_hash, is_admin) VALUES ($1, $2, $3) RETURNING id',
+      [name, hashPassword(String(password)), count === 0]);
+    await createSession(req, res, user.id);
     send(res, 201, { ok: true });
   },
 
   'POST /api/login': async (req, res) => {
     const { username = '', password = '' } = await readBody(req);
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username).trim());
+    const user = await db.get('SELECT * FROM users WHERE lower(username) = lower($1)', [String(username).trim()]);
     if (!user || !verifyPassword(String(password), user.password_hash))
       return send(res, 401, { error: 'Wrong username or password' });
-    createSession(res, user.id);
+    await createSession(req, res, user.id);
     send(res, 200, { ok: true });
   },
 
   'POST /api/logout': async (req, res) => {
     const token = parseCookies(req).sid;
-    if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-    res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+    if (token) await db.run('DELETE FROM sessions WHERE token = $1', [token]);
+    res.setHeader('Set-Cookie', cookie(req, '', 0));
     send(res, 200, { ok: true });
   },
 
   'GET /api/me': async (req, res, user) => {
-    const { n } = db.prepare('SELECT COUNT(*) AS n FROM users').get();
-    send(res, 200, { user, userCount: n, maxUsers: MAX_USERS, date: today() });
+    send(res, 200, { user, userCount: await userCount(), maxUsers: MAX_USERS, date: today() });
   },
 
   'GET /api/menu': async (req, res, user) => {
     if (!user) return send(res, 401, { error: 'Please log in' });
-    send(res, 200, db.prepare('SELECT * FROM menu_items WHERE active = 1 ORDER BY name').all());
+    send(res, 200, await db.all('SELECT id, name, price FROM menu_items WHERE active ORDER BY name'));
   },
 
   'POST /api/menu': async (req, res, user) => {
     if (!user?.is_admin) return send(res, 403, { error: 'Admins only' });
     const { name = '', price = 0 } = await readBody(req);
     if (!String(name).trim()) return send(res, 400, { error: 'Name required' });
-    db.prepare('INSERT INTO menu_items (name, price) VALUES (?, ?)').run(String(name).trim(), Number(price) || 0);
+    await db.run('INSERT INTO menu_items (name, price) VALUES ($1, $2)', [String(name).trim(), Number(price) || 0]);
     send(res, 201, { ok: true });
   },
 
   'POST /api/menu/remove': async (req, res, user) => {
     if (!user?.is_admin) return send(res, 403, { error: 'Admins only' });
     const { id } = await readBody(req);
-    db.prepare('UPDATE menu_items SET active = 0 WHERE id = ?').run(Number(id));
+    await db.run('UPDATE menu_items SET active = FALSE WHERE id = $1', [Number(id)]);
     send(res, 200, { ok: true });
   },
 
   'GET /api/orders': async (req, res, user) => {
     if (!user) return send(res, 401, { error: 'Please log in' });
-    const rows = db.prepare(`
+    send(res, 200, await db.all(`
       SELECT o.user_id, u.username, m.name AS item, m.price, o.quantity, o.notes, o.menu_item_id
       FROM orders o JOIN users u ON u.id = o.user_id JOIN menu_items m ON m.id = o.menu_item_id
-      WHERE o.order_date = ? ORDER BY u.username`).all(today());
-    send(res, 200, rows);
+      WHERE o.order_date = $1 ORDER BY lower(u.username)`, [today()]));
   },
 
   'POST /api/orders': async (req, res, user) => {
     if (!user) return send(res, 401, { error: 'Please log in' });
     const { menu_item_id, quantity = 1, notes = '' } = await readBody(req);
-    const item = db.prepare('SELECT id FROM menu_items WHERE id = ? AND active = 1').get(Number(menu_item_id));
+    const item = await db.get('SELECT id FROM menu_items WHERE id = $1 AND active', [Number(menu_item_id) || 0]);
     if (!item) return send(res, 400, { error: 'Pick a menu item' });
     const qty = Math.max(1, Math.min(10, parseInt(quantity, 10) || 1));
-    db.prepare(`
-      INSERT INTO orders (user_id, order_date, menu_item_id, quantity, notes) VALUES (?, ?, ?, ?, ?)
+    await db.run(`
+      INSERT INTO orders (user_id, order_date, menu_item_id, quantity, notes) VALUES ($1, $2, $3, $4, $5)
       ON CONFLICT (user_id, order_date) DO UPDATE SET
         menu_item_id = excluded.menu_item_id, quantity = excluded.quantity,
-        notes = excluded.notes, updated_at = datetime('now')`)
-      .run(user.id, today(), item.id, qty, String(notes).slice(0, 200));
+        notes = excluded.notes, updated_at = now()`,
+      [user.id, today(), item.id, qty, String(notes).slice(0, 200)]);
     send(res, 200, { ok: true });
   },
 
   'POST /api/orders/cancel': async (req, res, user) => {
     if (!user) return send(res, 401, { error: 'Please log in' });
-    db.prepare('DELETE FROM orders WHERE user_id = ? AND order_date = ?').run(user.id, today());
+    await db.run('DELETE FROM orders WHERE user_id = $1 AND order_date = $2', [user.id, today()]);
     send(res, 200, { ok: true });
   },
 };
@@ -215,14 +177,15 @@ const routes = {
 const PUBLIC = path.join(__dirname, 'public');
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
-http.createServer(async (req, res) => {
+async function handle(req, res) {
   const url = new URL(req.url, 'http://x');
   const handler = routes[`${req.method} ${url.pathname}`];
   if (handler) {
     try {
-      await handler(req, res, currentUser(req));
+      await handler(req, res, await currentUser(req));
     } catch (e) {
-      send(res, 400, { error: e.message });
+      console.error(e);
+      send(res, 500, { error: 'Server error, please try again' });
     }
     return;
   }
@@ -234,4 +197,11 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
     res.end(data);
   });
-}).listen(PORT, () => console.log(`Lunch Order app running at http://localhost:${PORT}`));
+}
+
+db.connect().then(() => {
+  http.createServer(handle).listen(PORT, () => console.log(`Lunch Order app running at http://localhost:${PORT}`));
+}).catch((e) => {
+  console.error('Could not connect to the database:', e);
+  process.exit(1);
+});

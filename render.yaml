@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: lunch-orders
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Singapore
+      - key: NODE_VERSION
+        value: "22"

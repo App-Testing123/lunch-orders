@@ -7,6 +7,10 @@
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.10",
+    "pg": "8.23.1"
   }
 }
