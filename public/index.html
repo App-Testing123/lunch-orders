@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lunch Orders</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🥪 Lunch Orders</h1>
+    <div id="userbar" hidden>
+      <span id="whoami"></span>
+      <button id="logout" class="link">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Login / Register -->
+    <section id="auth" class="card narrow" hidden>
+      <div class="tabs">
+        <button data-tab="login" class="active">Log in</button>
+        <button data-tab="register">Create account</button>
+      </div>
+      <form id="authForm">
+        <label>Username <input name="username" autocomplete="username" required /></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required /></label>
+        <label id="confirmWrap" hidden>Confirm password <input name="confirm" type="password" autocomplete="new-password" /></label>
+        <button type="submit" id="authSubmit">Log in</button>
+        <p class="error" id="authError"></p>
+        <p class="muted" id="seats"></p>
+      </form>
+    </section>
+
+    <!-- App -->
+    <section id="app" hidden>
+      <div class="grid">
+        <div class="card">
+          <h2>Your order for <span id="date"></span></h2>
+          <form id="orderForm">
+            <label>Item <select name="menu_item_id" id="menuSelect" required></select></label>
+            <label>Quantity <input name="quantity" type="number" min="1" max="10" value="1" /></label>
+            <label>Notes <input name="notes" maxlength="200" placeholder="e.g. no onions" /></label>
+            <div class="row">
+              <button type="submit" id="orderSubmit">Place order</button>
+              <button type="button" id="cancelOrder" class="secondary" hidden>Cancel my order</button>
+            </div>
+            <p class="error" id="orderError"></p>
+            <p class="ok" id="orderOk"></p>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Today's team orders</h2>
+          <table>
+            <thead><tr><th>Name</th><th>Item</th><th>Qty</th><th>Notes</th><th class="num">Cost</th></tr></thead>
+            <tbody id="ordersBody"></tbody>
+            <tfoot><tr><td colspan="4" id="ordersCount"></td><td class="num" id="ordersTotal"></td></tr></tfoot>
+          </table>
+          <h3>Summary for the restaurant</h3>
+          <ul id="summary"></ul>
+        </div>
+      </div>
+
+      <div class="card" id="adminCard" hidden>
+        <h2>Menu (admin)</h2>
+        <ul id="menuList" class="menulist"></ul>
+        <form id="menuForm" class="row">
+          <input name="name" placeholder="New item name" required />
+          <input name="price" type="number" step="0.01" min="0" placeholder="Price" style="max-width:110px" />
+          <button type="submit">Add item</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

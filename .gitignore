@@ -1,0 +1,4 @@
+node_modules/
+lunch.db
+lunch.db-*
+.claude/
